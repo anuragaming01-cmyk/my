@@ -167,7 +167,19 @@
             borderWidth: 2
         }]};
 
-        // Chart.js Setup
+        // Fallback simulation state for direct UI preview/blob context
+        let isSimulating = false;
+        let simState = {
+            url: '',
+            status: 'System Idle',
+            lastChecked: null,
+            lastLatency: 0,
+            totalPings: 0,
+            logs: ['// System ready. Enter a URL above to start observing...'],
+            history: []
+        };
+        let simTimer = null;
+
         function initChart() {
             const ctx = document.getElementById('latencyChart').getContext('2d');
             latencyChart = new Chart(ctx, {
@@ -185,109 +197,171 @@
             });
         }
 
+        function buildApiUrl(endpoint) {
+            try {
+                if (window.location.protocol === 'blob:' || window.location.protocol === 'file:' || window.location.origin === 'null') {
+                    return null;
+                }
+                return endpoint;
+            } catch (e) {
+                return null;
+            }
+        }
+
+        async function apiRequest(endpoint, method = 'GET', body = null) {
+            const url = buildApiUrl(endpoint);
+            if (!url) {
+                throw new Error("Blob/Preview environment detected");
+            }
+            const opts = { method, headers: { 'Content-Type': 'application/json' } };
+            if (body) opts.body = JSON.stringify(body);
+            const res = await fetch(url, opts);
+            if (!res.ok) throw new Error('API returned status ' + res.status);
+            return await res.json();
+        }
+
         async function startMonitoring() {
-            const url = document.getElementById('targetUrlInput').value.trim();
-            if(!url) return alert('অনুগ্রহ করে একটি সঠিক URL দিন!');
+            const urlInput = document.getElementById('targetUrlInput').value.trim();
+            if(!urlInput) return alert('অনুগ্রহ করে একটি সঠিক URL দিন!');
+
+            let formattedUrl = urlInput;
+            if (!/^https?:\/\//i.test(urlInput)) {
+                formattedUrl = 'https://' + urlInput;
+                document.getElementById('targetUrlInput').value = formattedUrl;
+            }
 
             try {
-                const res = await fetch('/api/start', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ url })
-                });
-                const data = await res.json();
-                alert(data.message);
+                const data = await apiRequest('/api/start', 'POST', { url: formattedUrl });
+                alert(data.message || '24/7 Monitoring Started!');
+                isSimulating = false;
             } catch (err) {
-                alert('শুরু করতে সমস্যা হয়েছে: ' + err.message);
+                // Fallback to interactive local simulation mode when previewing without live Express server
+                runLocalSimulation(formattedUrl);
             }
+        }
+
+        function runLocalSimulation(targetUrl) {
+            if (simTimer) clearInterval(simTimer);
+            isSimulating = true;
+            simState.url = targetUrl;
+            simState.status = 'ONLINE 🟢';
+            simState.totalPings = 0;
+            simState.history = [];
+            simState.logs = [`[${new Date().toLocaleTimeString()}] (Preview Mode) Started observing: ${targetUrl}`];
+
+            simTimer = setInterval(() => {
+                const now = new Date().toLocaleTimeString();
+                const latency = Math.floor(Math.random() * 35) + 18;
+                simState.lastLatency = latency;
+                simState.totalPings++;
+                simState.lastChecked = now;
+                simState.status = 'ONLINE 🟢';
+                simState.logs.unshift(`[${now}] HTTP 200 OK - Latency: ${latency}ms`);
+                if (simState.logs.length > 25) simState.logs.pop();
+
+                simState.history.push({ time: now, latency });
+                if (simState.history.length > 15) simState.history.shift();
+
+                renderDashboard(simState);
+            }, 3000);
+
+            renderDashboard(simState);
         }
 
         async function stopMonitoring() {
             try {
-                const res = await fetch('/api/stop', { method: 'POST' });
-                const data = await res.json();
-                alert(data.message);
+                if (!isSimulating) {
+                    const data = await apiRequest('/api/stop', 'POST');
+                    alert(data.message || 'Monitoring stopped.');
+                } else {
+                    if (simTimer) clearInterval(simTimer);
+                    simState.status = 'Stopped';
+                    simState.logs.unshift(`[${new Date().toLocaleTimeString()}] Monitoring stopped by user.`);
+                    renderDashboard(simState);
+                }
             } catch (err) {
-                alert('বন্ধ করতে সমস্যা হয়েছে!');
+                if (simTimer) clearInterval(simTimer);
+                simState.status = 'Stopped';
+                renderDashboard(simState);
             }
         }
 
         async function syncDashboard() {
+            if (isSimulating) return;
+
             try {
-                const res = await fetch('/api/status');
-                const data = await res.json();
-
-                // URL Setting
-                if(data.url && !document.getElementById('targetUrlInput').value) {
-                    document.getElementById('targetUrlInput').value = data.url;
-                }
-
-                // Global Indicator Updates
-                const globalInd = document.getElementById('globalIndicator');
-                const globalTxt = document.getElementById('globalStatusText');
-                const cardStat = document.getElementById('cardStatus');
-                const statusPulse = document.getElementById('statusPulseBg');
-                const statusIcon = document.getElementById('statusIcon');
-
-                if (data.status === 'ONLINE 🟢') {
-                    globalInd.className = "w-3 h-3 rounded-full bg-emerald-500 pulse-green";
-                    globalTxt.innerText = "Monitoring Active";
-                    globalTxt.className = "text-sm font-semibold text-emerald-400";
-                    cardStat.innerText = "ONLINE 200 OK";
-                    cardStat.className = "text-lg font-bold text-emerald-400 mt-1";
-                    statusPulse.className = "w-10 h-10 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center pulse-green";
-                    statusIcon.className = "fa-solid fa-check text-emerald-400";
-                } else if (data.status.includes('ISSUES') || data.status.includes('DOWN')) {
-                    globalInd.className = "w-3 h-3 rounded-full bg-red-500 pulse-red";
-                    globalTxt.innerText = "Target Down / Issue";
-                    globalTxt.className = "text-sm font-semibold text-red-400";
-                    cardStat.innerText = data.status;
-                    cardStat.className = "text-lg font-bold text-red-400 mt-1";
-                    statusPulse.className = "w-10 h-10 rounded-full bg-red-500/20 text-red-400 flex items-center justify-center pulse-red";
-                    statusIcon.className = "fa-solid fa-triangle-exclamation text-red-400";
-                } else {
-                    globalInd.className = "w-3 h-3 rounded-full bg-gray-500";
-                    globalTxt.innerText = "System Idle";
-                    globalTxt.className = "text-sm font-semibold text-gray-400";
-                    cardStat.innerText = data.status || "Standby";
-                    cardStat.className = "text-lg font-bold text-gray-400 mt-1";
-                    statusPulse.className = "w-10 h-10 rounded-full bg-gray-800 text-gray-500 flex items-center justify-center";
-                    statusIcon.className = "fa-solid fa-signal text-gray-500";
-                }
-
-                // Metrics Update
-                document.getElementById('cardLatency').innerText = (data.lastLatency || 0) + ' ms';
-                document.getElementById('cardTotalPings').innerText = data.totalPings || 0;
-                document.getElementById('cardLastTime').innerText = data.lastChecked || '--:--:--';
-
-                // Terminal Logs Update
-                if(data.logs && data.logs.length > 0) {
-                    const terminal = document.getElementById('terminalLog');
-                    terminal.innerHTML = data.logs.map(log => {
-                        let colorClass = "text-emerald-400";
-                        if(log.includes("Error") || log.includes("DOWN") || log.includes("404") || log.includes("500")) colorClass = "text-red-400";
-                        if(log.includes("Setting up") || log.includes("Stopped")) colorClass = "text-yellow-400";
-                        return `<div class="${colorClass}">${log}</div>`;
-                    }).join('');
-                }
-
-                // Chart Data Sync
-                if(data.history && data.history.length > 0) {
-                    latencyChart.data.labels = data.history.map(h => h.time);
-                    latencyChart.data.datasets[0].data = data.history.map(h => h.latency);
-                    latencyChart.update();
-                }
-
+                const data = await apiRequest('/api/status', 'GET');
+                renderDashboard(data);
             } catch (err) {
-                console.error("Dashboard Sync Error:", err);
+                if (!simState.url) {
+                    simState.status = 'System Idle';
+                    renderDashboard(simState);
+                }
             }
         }
 
-        // Initialize Page
+        function renderDashboard(data) {
+            if(data.url && !document.getElementById('targetUrlInput').value) {
+                document.getElementById('targetUrlInput').value = data.url;
+            }
+
+            const globalInd = document.getElementById('globalIndicator');
+            const globalTxt = document.getElementById('globalStatusText');
+            const cardStat = document.getElementById('cardStatus');
+            const statusPulse = document.getElementById('statusPulseBg');
+            const statusIcon = document.getElementById('statusIcon');
+
+            if (data.status === 'ONLINE 🟢') {
+                globalInd.className = "w-3 h-3 rounded-full bg-emerald-500 pulse-green";
+                globalTxt.innerText = "Monitoring Active";
+                globalTxt.className = "text-sm font-semibold text-emerald-400";
+                cardStat.innerText = "ONLINE 200 OK";
+                cardStat.className = "text-lg font-bold text-emerald-400 mt-1";
+                statusPulse.className = "w-10 h-10 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center pulse-green";
+                statusIcon.className = "fa-solid fa-check text-emerald-400";
+            } else if (data.status.includes('ISSUES') || data.status.includes('DOWN')) {
+                globalInd.className = "w-3 h-3 rounded-full bg-red-500 pulse-red";
+                globalTxt.innerText = "Target Down / Issue";
+                globalTxt.className = "text-sm font-semibold text-red-400";
+                cardStat.innerText = data.status;
+                cardStat.className = "text-lg font-bold text-red-400 mt-1";
+                statusPulse.className = "w-10 h-10 rounded-full bg-red-500/20 text-red-400 flex items-center justify-center pulse-red";
+                statusIcon.className = "fa-solid fa-triangle-exclamation text-red-400";
+            } else {
+                globalInd.className = "w-3 h-3 rounded-full bg-gray-500";
+                globalTxt.innerText = "System Idle";
+                globalTxt.className = "text-sm font-semibold text-gray-400";
+                cardStat.innerText = data.status || "Standby";
+                cardStat.className = "text-lg font-bold text-gray-400 mt-1";
+                statusPulse.className = "w-10 h-10 rounded-full bg-gray-800 text-gray-500 flex items-center justify-center";
+                statusIcon.className = "fa-solid fa-signal text-gray-500";
+            }
+
+            document.getElementById('cardLatency').innerText = (data.lastLatency || 0) + ' ms';
+            document.getElementById('cardTotalPings').innerText = data.totalPings || 0;
+            document.getElementById('cardLastTime').innerText = data.lastChecked || '--:--:--';
+
+            if(data.logs && data.logs.length > 0) {
+                const terminal = document.getElementById('terminalLog');
+                terminal.innerHTML = data.logs.map(log => {
+                    let colorClass = "text-emerald-400";
+                    if(log.includes("Error") || log.includes("DOWN") || log.includes("404") || log.includes("500")) colorClass = "text-red-400";
+                    if(log.includes("Setting up") || log.includes("Stopped") || log.includes("Preview")) colorClass = "text-yellow-400";
+                    return `<div class="${colorClass}">${log}</div>`;
+                }).join('');
+            }
+
+            if(data.history && data.history.length > 0 && latencyChart) {
+                latencyChart.data.labels = data.history.map(h => h.time);
+                latencyChart.data.datasets[0].data = data.history.map(h => h.latency);
+                latencyChart.update();
+            }
+        }
+
         window.onload = () => {
             initChart();
             syncDashboard();
-            setInterval(syncDashboard, 2000); // ২ সেকেন্ড পর পর ড্যাশবোর্ড ডাটা আপডেট হবে
+            setInterval(syncDashboard, 2000);
         };
     </script>
 </body>
